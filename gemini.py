@@ -65,10 +65,7 @@ def extract_bank_statement(
         # 1. Upload the file to the Gemini File API
         # Using a context manager ensures the file object is closed properly.
         # We pass the bytes directly via an in-memory file for better Streamlit compatibility.
-        pdf_file = client.files.upload(
-            file=io.BytesIO(file_bytes),
-            display_name=pdf_file_path
-        )
+        pdf_file = client.files.upload(file=io.BytesIO(file_bytes))
 
         # 2. Create the prompt - IMPROVEMENT for more specific extraction
         PROMPT = (
