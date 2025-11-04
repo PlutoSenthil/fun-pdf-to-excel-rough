@@ -69,11 +69,24 @@ class ExtractedFinancialStatement(BaseModel):
     )
 
 
-# ----------------- JSON parsing hardener -----------------
+# ----------------- JSON salvage utilities -----------------
+
+# strip markdown fences like ```json ... ```
 _CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
+# remove control characters that JSON doesn't allow
+_CTRL_CHARS_RE = re.compile(r'[\x00-\x08\x0B\x0C\x0E-\x1F]')
 
 def _strip_code_fences(s: str) -> str:
     return _CODE_FENCE_RE.sub("", s).strip()
+
+def _clean_json_text(s: str) -> str:
+    if not s:
+        return s
+    s = s.replace("\ufeff", "")  # BOM
+    # normalize fancy quotes to plain quotes
+    s = s.replace("“", '"').replace("”", '"').replace("’", "'").replace("‘", "'")
+    s = _CTRL_CHARS_RE.sub("", s)
+    return s.strip()
 
 def _try_json_loads(s: str) -> Optional[Dict[str, Any]]:
     try:
@@ -82,16 +95,28 @@ def _try_json_loads(s: str) -> Optional[Dict[str, Any]]:
     except Exception:
         return None
 
+def _remove_trailing_commas(s: str) -> str:
+    # Remove trailing commas before } or ]
+    s = re.sub(r',(\s*[}\]])', r'\1', s)
+    return s
+
 def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
     """
-    Extract the first well-formed top-level JSON object from arbitrary text.
-    Handles code fences and extra commentary by scanning for balanced braces.
+    Extract the first well-formed top-level JSON object by scanning for balanced braces.
+    Handles strings/escapes to avoid prematurely closing.
     """
-    cleaned = _strip_code_fences(text)
+    cleaned = _strip_code_fences(_clean_json_text(text))
+
     whole = _try_json_loads(cleaned)
     if whole is not None:
         return whole
 
+    # Try with trailing-comma removal
+    rc = _try_json_loads(_remove_trailing_commas(cleaned))
+    if rc is not None:
+        return rc
+
+    # Scan for first balanced object
     starts = [m.start() for m in re.finditer(r"\{", cleaned)]
     for start in starts:
         depth, in_str, esc = 0, False, False
@@ -112,10 +137,51 @@ def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
                 elif ch == "}":
                     depth -= 1
                     if depth == 0:
-                        candidate = cleaned[start : idx + 1]
+                        candidate = cleaned[start: idx + 1]
+                        # try as-is
                         obj = _try_json_loads(candidate)
                         if obj is not None:
                             return obj
+                        # try without trailing commas
+                        obj = _try_json_loads(_remove_trailing_commas(candidate))
+                        if obj is not None:
+                            return obj
+
+    # Optional: try json5 if available (more lenient)
+    try:
+        import json5  # type: ignore
+        try:
+            return json5.loads(cleaned)
+        except Exception:
+            # try on the largest balanced chunk if possible
+            starts = [m.start() for m in re.finditer(r"\{", cleaned)]
+            for start in starts:
+                depth, in_str, esc = 0, False, False
+                for idx in range(start, len(cleaned)):
+                    ch = cleaned[idx]
+                    if in_str:
+                        if esc:
+                            esc = False
+                        elif ch == "\\":
+                            esc = True
+                        elif ch == '"':
+                            in_str = False
+                    else:
+                        if ch == '"':
+                            in_str = True
+                        elif ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                            if depth == 0:
+                                candidate = cleaned[start: idx + 1]
+                                try:
+                                    return json5.loads(candidate)
+                                except Exception:
+                                    pass
+    except Exception:
+        pass
+
     return None
 
 
@@ -137,7 +203,6 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
     - IQR outliers in debits/credits
     - Adjacent reversal pairs (equal/opposite amounts)
     - High-frequency same-day repeats (same description+amount)
-    Returns a list of alert strings (never raises).
     """
     alerts = []
     tx = payload.get("transaction_data") or []
@@ -242,7 +307,7 @@ def extract_financial_statement(
         client = genai.Client(api_key=api_key)
 
         # Inline file bytes; explicit mime_type (no filename arg).
-        pdf_part = types.Part.from_bytes(
+        content_part = types.Part.from_bytes(
             data=file_bytes,
             mime_type="application/pdf",
         )
@@ -265,7 +330,7 @@ def extract_financial_statement(
 
         response = client.models.generate_content(
             model=model_id,
-            contents=[PROMPT, pdf_part],
+            contents=[PROMPT, content_part],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=ExtractedFinancialStatement,
@@ -292,7 +357,7 @@ def extract_financial_statement(
             "candidates_texts": candidates_texts,
         }
 
-        # ---------- Robust parsing ----------
+        # ---------- Robust parsing & salvage ----------
         payload: Optional[Dict[str, Any]] = None
 
         if hasattr(response, "parsed") and response.parsed:
@@ -327,8 +392,8 @@ def extract_financial_statement(
 
         return payload, raw_dump, None
 
-    except Exception as e:
-        # Keep error concise
+    except Exception:
+        # keep concise
         return None, None, "Extraction error."
 
 

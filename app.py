@@ -76,34 +76,6 @@ def _try_extract_pdf_text_stats(file_bytes: bytes) -> Optional[Dict[str, Any]]:
         return None
 
 
-def _try_ocr_sample(file_bytes: bytes, pages_to_ocr: int = 1) -> Optional[str]:
-    """
-    Optional OCR sample using PyMuPDF rasterization + pytesseract.
-    Returns sample text or None if libs not available or failure.
-    """
-    try:
-        import fitz  # pymupdf
-        from PIL import Image
-        import pytesseract
-    except Exception:
-        return None
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        sample = []
-        for idx, page in enumerate(doc):
-            if idx >= pages_to_ocr:
-                break
-            pix = page.get_pixmap(dpi=200)  # rasterize
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            txt = pytesseract.image_to_string(img) or ""
-            if txt.strip():
-                sample.append(txt.strip())
-        doc.close()
-        return "\n\n".join(sample)[:1200] if sample else None
-    except Exception:
-        return None
-
-
 def _ensure_usage_log_in_state():
     if "usage_log" not in st.session_state:
         st.session_state["usage_log"] = []
@@ -209,7 +181,8 @@ if uploaded_file:
     c2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
     c3.metric("Model Selected", MODEL_ID)
 
-    # Optional local PDF stats (tokens estimate) and OCR sample
+    # Optional local PDF stats (tokens estimate)
+    pdf_stats = None
     try:
         uploaded_file.seek(0)
         file_bytes_for_stats = uploaded_file.read()
@@ -224,11 +197,6 @@ if uploaded_file:
                 })
                 if pdf_stats.get("sample_text"):
                     st.code(pdf_stats["sample_text"][:600], language="text")
-        # Optional OCR sample (if libraries available)
-        ocr_snippet = _try_ocr_sample(file_bytes_for_stats, pages_to_ocr=1)
-        if ocr_snippet:
-            with st.expander("🔎 OCR Sample (pytesseract)", expanded=False):
-                st.code(ocr_snippet, language="text")
     except Exception:
         pass
 
@@ -263,7 +231,7 @@ if uploaded_file:
                 }
 
                 _append_usage_log(
-                    api_key_label=api_key_label,
+                    api_key_label=(api_key_label if available_keys else "MANUAL"),
                     model_id=MODEL_ID,
                     file_name=uploaded_file.name,
                     file_size_bytes=uploaded_file.size,
@@ -275,7 +243,7 @@ if uploaded_file:
 
                 if error:
                     st.error("Extraction failed.")
-                    # Provide raw-response download options to avoid wasting the run
+                    # Raw-response download to avoid wasting the run
                     st.subheader("Backup: Raw Gemini Response")
                     base_name = os.path.splitext(uploaded_file.name)[0]
 
@@ -339,7 +307,7 @@ if uploaded_file:
                         st.download_button(
                             label="⬇️ Download Extracted Data (.xlsx)",
                             data=excel_buffer,
-                            file_name=f"{base_name}_extracted.xlsx",
+                            file_name=f"{base_name}.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     else:
