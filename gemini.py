@@ -1,25 +1,29 @@
-# gemini.py
-
 import io
 import json
 import pandas as pd
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
-# --- Pydantic Models ---
-# Note: Renamed models to avoid the word 'Bank'
 
+# --- Pydantic Models ---
 # 1. Transaction Row Model (6 Columns)
 class FinancialTransactionRow(BaseModel):
     date: str = Field(description="The date of the transaction (e.g., '30/10/2025').")
-    reference_or_cheque_no: Optional[str] = Field(None, description="The unique transaction reference number, cheque number, or UPI ID/Ref. Null if not provided.")
+    reference_or_cheque_no: Optional[str] = Field(
+        None, description="The unique transaction reference number, cheque number, or UPI ID/Ref. Null if not provided."
+    )
     description: str = Field(description="The full narration or transaction details.")
-    withdrawal_amount: Optional[float] = Field(None, description="The amount withdrawn/debited. Null if it's a credit. Must be a positive number.")
-    credit_amount: Optional[float] = Field(None, description="The amount deposited/credited. Null if it's a debit. Must be a positive number.")
+    withdrawal_amount: Optional[float] = Field(
+        None, description="The amount withdrawn/debited. Null if it's a credit. Must be a positive number."
+    )
+    credit_amount: Optional[float] = Field(
+        None, description="The amount deposited/credited. Null if it's a debit. Must be a positive number."
+    )
     balance: float = Field(description="The running balance of the account *after* this transaction is processed.")
+
 
 # 2. Overall Statement Model (Includes Header/Footer Info)
 class ExtractedFinancialStatement(BaseModel):
@@ -44,26 +48,30 @@ class ExtractedFinancialStatement(BaseModel):
 def extract_financial_statement(
     api_key: str,
     model_id: str,
-    pdf_file_path: str, # File path/handle from Streamlit
+    pdf_file_path: str,  # File path/handle from Streamlit
     file_bytes: bytes,
-) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Extracts structured financial statement data from a PDF using the Gemini API 
+    Extracts structured financial statement data from a PDF using the Gemini API
     via the reliable Part.from_bytes() method (inline file transfer).
     NOTE: This method is best for files under 20MB.
     """
     try:
+        if not api_key:
+            return None, "Missing API key."
+
         # Initialize the client
         client = genai.Client(api_key=api_key)
 
         # 1. Define the PDF content part using bytes and explicit mime_type.
-        # This bypasses client.files.upload() which was causing the MIME type/keyword argument issues.
+        # Important: include a filename to avoid 'Unknown mime type' errors.
         pdf_part = types.Part.from_bytes(
             data=file_bytes,
-            mime_type="application/pdf"
+            mime_type="application/pdf",
+            filename=pdf_file_path if pdf_file_path else "statement.pdf",
         )
 
-        # 2. Create the prompt 
+        # 2. Create the prompt
         PROMPT = (
             "You are an expert financial data extraction bot. "
             "From the uploaded Financial Statement PDF document, meticulously extract "
@@ -74,17 +82,18 @@ def extract_financial_statement(
         )
 
         # 3. Call the Gemini API for structured content
-        print(f"Sending request to {model_id} for structured extraction...")
+        # Keep logic same—use response_schema and expect JSON back.
         response = client.models.generate_content(
             model=model_id,
-            contents=[PROMPT, pdf_part], # Contents now include the prompt text and the PDF bytes part
+            contents=[PROMPT, pdf_part],  # prompt + PDF bytes part
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=ExtractedFinancialStatement,
             ),
         )
 
-        # 4. Process the response. (No cleanup needed as the file was sent inline)
+        # 4. Process the response
+        # Keep your original approach; parse response.text.
         extracted_data = json.loads(response.text)
 
         return extracted_data, None
@@ -92,6 +101,7 @@ def extract_financial_statement(
     except Exception as e:
         # Catch and return any API or JSON parsing errors
         return None, f"An error occurred during extraction: {e}"
+
 
 # --- Utility Function to Convert JSON to Excel (for app.py) ---
 
@@ -102,32 +112,33 @@ def json_to_excel_buffer(json_data: Dict[str, Any]) -> io.BytesIO:
     # 1. Create the DataFrame from the 'transaction_data' list
     transaction_list = json_data.get("transaction_data", [])
     df = pd.DataFrame(transaction_list)
-    
+
     # 2. Create an in-memory buffer
     output = io.BytesIO()
-    
+
     # 3. Use an ExcelWriter to write data and metadata to different sheets
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+    # Using openpyxl since it's in your dependency list.
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
         # Write Transaction Data to the first sheet
-        df.to_excel(writer, sheet_name='Transactions', index=False)
+        df.to_excel(writer, sheet_name="Transactions", index=False)
 
         # Write Header/Summary Data to the second sheet (Metadata)
-        metadata = {k: v for k, v in json_data.items() if k != 'transaction_data'}
-        
-        # Convert dictionary to a two-column DataFrame for a clean look
-        metadata_df = pd.DataFrame(list(metadata.items()), columns=['Field', 'Value'])
-        metadata_df.to_excel(writer, sheet_name='Summary', index=False)
-        
-        # Auto-adjust column widths for readability
-        worksheet_t = writer.sheets['Transactions']
-        for i, col in enumerate(df.columns):
-            max_len = max(df[col].astype(str).str.len().max() if not df[col].empty else 0, len(col)) + 2
-            worksheet_t.set_column(i, i, max_len)
+        metadata = {k: v for k, v in json_data.items() if k != "transaction_data"}
 
-        worksheet_s = writer.sheets['Summary']
-        for i, col in enumerate(metadata_df.columns):
-            max_len = max(metadata_df[col].astype(str).str.len().max() if not metadata_df[col].empty else 0, len(col)) + 2
-            worksheet_s.set_column(i, i, max_len)
+        # Convert dictionary to a two-column DataFrame for a clean look
+        metadata_df = pd.DataFrame(list(metadata.items()), columns=["Field", "Value"])
+        metadata_df.to_excel(writer, sheet_name="Summary", index=False)
+
+        # Auto-adjust column widths for readability (approximation for openpyxl)
+        ws_t = writer.sheets["Transactions"]
+        for i, col in enumerate(df.columns, start=1):
+            max_len = max((df[col].astype(str).str.len().max() if not df.empty else 0), len(col)) + 2
+            ws_t.column_dimensions[ws_t.cell(row=1, column=i).column_letter].width = max_len
+
+        ws_s = writer.sheets["Summary"]
+        for i, col in enumerate(metadata_df.columns, start=1):
+            max_len = max((metadata_df[col].astype(str).str.len().max() if not metadata_df.empty else 0), len(col)) + 2
+            ws_s.column_dimensions[ws_s.cell(row=1, column=i).column_letter].width = max_len
 
     # Move the buffer's cursor to the beginning
     output.seek(0)

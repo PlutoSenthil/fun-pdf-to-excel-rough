@@ -1,5 +1,3 @@
-# app.py
-
 import streamlit as st
 import os
 import pandas as pd
@@ -7,15 +5,15 @@ from gemini import extract_financial_statement, json_to_excel_buffer
 from typing import Dict, Any
 
 # --- Model Configuration for Dropdown ---
-# Using the model IDs and descriptions based on the table you provided.
+# NOTE: Set default label to "Gemini 2.0 Flash" -> "gemini-2.0-flash"
 MODEL_CHOICES = {
-    "gemini-2.5-flash (1 RPM, 4.37K TPM)": "gemini-2.5-flash",
-    "gemini-2.5-pro (0 RPM, 0 TPM)": "gemini-2.5-pro",
-    "gemini-2.0-flash (0 RPM, 0 TPM)": "gemini-2.0-flash",
-    "gemini-2.5-flash-lite (0 RPM, 0 TPM)": "gemini-2.5-flash-lite",
-    "gemini-2.0-flash-lite (0 RPM, 0 TPM)": "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-exp (0 RPM, 0 TPM)": "gemini-2.0-flash-exp",
-    "learnlm-2.0-flash-experimental (0 RPM, 0 TPM)": "learnlm-2.0-flash-experimental",
+    "Gemini 2.5 Flash": "gemini-2.5-flash",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
+    "Gemini 2.0 Flash": "gemini-2.0-flash",  # default choice
+    "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2.0 Flash Lite": "gemini-2.0-flash-lite",
+    "Gemini 2.0 Flash Experimental": "gemini-2.0-flash-exp",
+    "LearnLM 2.0 Flash Experimental": "learnlm-2.0-flash-experimental",
 }
 
 # --- Streamlit UI Setup ---
@@ -31,11 +29,11 @@ st.markdown("Upload a **PDF Financial Statement** and use a Gemini model to extr
 # --- Sidebar for Configuration ---
 with st.sidebar:
     st.header("Configuration")
-    
+
     # 1. API Key Setup
     st.markdown("### ✅ API Key Setup")
     api_key = None
-    
+
     # Try to load from Streamlit secrets first
     try:
         api_key = st.secrets["GOOGLE_API_KEY_1"]
@@ -43,7 +41,7 @@ with st.sidebar:
     except (KeyError, AttributeError):
         # Fallback to text input
         api_key = st.text_input(
-            "Enter your Google Gemini API Key", 
+            "Enter your Google Gemini API Key",
             type="password",
             key="api_key_input",
             help="For Streamlit Cloud, use `secrets.toml` with the key `GOOGLE_API_KEY_1`."
@@ -55,11 +53,15 @@ with st.sidebar:
 
     # 2. Model Selection
     st.markdown("### ⚙️ Select Model")
+    options = list(MODEL_CHOICES.keys())
+    # Default to "Gemini 2.0 Flash"
+    default_index = options.index("Gemini 2.0 Flash") if "Gemini 2.0 Flash" in options else 0
+
     selected_model_name_display = st.selectbox(
         "Choose the Gemini Model",
-        options=list(MODEL_CHOICES.keys()),
-        index=0, # Default to Flash 2.5
-        help="The model ID in parentheses reflects the current usage rates in the table you provided."
+        options=options,
+        index=default_index,
+        help="Flash is fast and cost-effective; Pro is higher quality but may be slower or restricted."
     )
     # Convert display name back to the model ID for the API call
     MODEL_ID = MODEL_CHOICES[selected_model_name_display]
@@ -68,10 +70,10 @@ with st.sidebar:
     # 3. File Uploader
     st.markdown("### ⬆️ Upload PDF")
     uploaded_file = st.file_uploader(
-        "Upload a PDF Financial Statement", 
+        "Upload a PDF Financial Statement",
         type=["pdf"]
     )
-    
+
 # --- Main Application Logic ---
 
 # Status Check
@@ -95,11 +97,11 @@ if uploaded_file:
             try:
                 # Display a progress indicator
                 with st.spinner(f"Extracting data using **{MODEL_ID}**... This may take a moment."):
-                    
+
                     # Read the file into bytes
-                    uploaded_file.seek(0) # Ensure we read from the start of the file buffer
+                    uploaded_file.seek(0)  # Ensure we read from the start of the file buffer
                     file_bytes = uploaded_file.read()
-                    
+
                     # Get the extracted JSON data and any potential error
                     extracted_data, error = extract_financial_statement(
                         api_key=api_key,
@@ -111,19 +113,18 @@ if uploaded_file:
                 if error:
                     # Show the error message from the core function
                     st.error(f"Extraction Failed: {error}")
-                
+
                 elif extracted_data:
                     st.success("🎉 Data Extraction Complete!")
 
                     # 1. Display Header/Summary Data
                     st.subheader("Summary Information")
-                    
+
                     summary_cols = ['institution_name', 'account_holder_name', 'statement_period', 'initial_balance', 'closing_balance']
                     summary_data = {k.replace('_', ' ').title(): extracted_data.get(k) for k in summary_cols}
-                    
+
                     summary_df = pd.DataFrame(summary_data.items(), columns=["Field", "Value"])
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
 
                     # 2. Display Transaction Data (First 10 rows preview)
                     st.subheader("Transaction Data Preview")
@@ -135,7 +136,7 @@ if uploaded_file:
 
                         # 3. Create and offer the Excel file for download
                         excel_buffer = json_to_excel_buffer(extracted_data)
-                        
+
                         # Determine the output filename (match input)
                         base_name = os.path.splitext(uploaded_file.name)[0]
                         output_filename = f"{base_name}_extracted.xlsx"
@@ -148,7 +149,7 @@ if uploaded_file:
                         )
                     else:
                         st.warning("The model returned summary data but no transactions were found in the PDF. Please try a different model.")
-                
+
             except Exception as e:
                 # Catch any unexpected application-level errors
                 st.error(f"An unexpected application error occurred: {e}")

@@ -1,5 +1,5 @@
-google-genai==1.46.0
-pydantic==2.11.10
+google-genai
+pydantic
 pandas
 streamlit
 openpyxl
