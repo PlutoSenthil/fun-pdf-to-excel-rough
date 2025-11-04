@@ -1,108 +1,215 @@
+import json
 import os
-from typing import Dict, Any
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional, List, Tuple
 
 import pandas as pd
 import streamlit as st
 
 from gemini import extract_financial_statement, json_to_excel_buffer
 
-# --- Model Configuration for Dropdown ---
-# Default should be "Gemini 2.0 Flash": "gemini-2.0-flash"
+
+# ---------------- Model & Key Selection ----------------
 MODEL_CHOICES = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
     "Gemini 2.5 Pro": "gemini-2.5-pro",
-    "Gemini 2.0 Flash": "gemini-2.0-flash",  # default choice
+    "Gemini 2.0 Flash": "gemini-2.0-flash",  # default
     "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
     "Gemini 2.0 Flash Lite": "gemini-2.0-flash-lite",
     "Gemini 2.0 Flash Experimental": "gemini-2.0-flash-exp",
     "LearnLM 2.0 Flash Experimental": "learnlm-2.0-flash-experimental",
 }
 
-# --- Streamlit UI Setup ---
 st.set_page_config(
     page_title="PDF Financial Statement Extractor",
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-st.title("📄 Gemini-Powered Financial Statement Extractor")
+st.title("📄 Gemini‑Powered Financial Statement Extractor")
 st.markdown(
-    "Upload a **PDF Financial Statement** and use a Gemini model to extract structured transaction data into an Excel file."
+    "Upload a **PDF financial statement** and extract structured transactions into Excel.\n\n"
+    "This app also:\n"
+    "- Captures **raw model responses** for download if table conversion fails (save your free-tier runs).\n"
+    "- Maintains a **usage log** per API key and model.\n"
+    "- Flags **unusual activity** in the transactions."
 )
 
-# --- Sidebar for Configuration ---
+
+# ---------------- Helpers ----------------
+def _mask_key(k: str) -> str:
+    if not k or len(k) < 8:
+        return "********"
+    return f"{k[:4]}...{k[-4:]}"
+
+
+def _load_available_api_keys() -> List[Tuple[str, str]]:
+    """
+    Returns list of tuples (label, key) for GOOGLE_API_KEY_1..3 found in st.secrets.
+    """
+    found = []
+    for i in (1, 2, 3):
+        name = f"GOOGLE_API_KEY_{i}"
+        try:
+            k = st.secrets[name]
+            if k:
+                found.append((name, k))
+        except Exception:
+            continue
+    return found
+
+
+def _quota_or_rate_limit_suspected(error_msg: str) -> bool:
+    if not error_msg:
+        return False
+    e = error_msg.lower()
+    return any(
+        term in e
+        for term in [
+            "quota", "rate limit", "429", "resource exhausted", "exceeded", "quota exceeded",
+            "too many requests", "billing", "insufficient", "free tier"
+        ]
+    )
+
+
+def _try_extract_pdf_text_stats(file_bytes: bytes) -> Optional[Dict[str, Any]]:
+    """Optional local text stats (pymupdf if available)."""
+    try:
+        import fitz  # pymupdf
+    except Exception:
+        return None
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text_parts = [page.get_text("text") or "" for page in doc]
+        text = "\n".join(text_parts)
+        pages = doc.page_count
+        doc.close()
+        char_count = len(text)
+        word_count = len(text.split())
+        est_tokens = max(int(char_count / 4), int(word_count * 0.75))
+        return {"pages": pages, "char_count": char_count, "word_count": word_count, "estimated_tokens": est_tokens}
+    except Exception:
+        return None
+
+
+def _ensure_usage_log_in_state():
+    if "usage_log" not in st.session_state:
+        st.session_state["usage_log"] = []
+
+
+def _append_usage_log(
+    api_key_label: str,
+    model_id: str,
+    file_name: str,
+    file_size_bytes: int,
+    duration_sec: float,
+    success: bool,
+    error_msg: Optional[str],
+    meta: Optional[Dict[str, Any]] = None
+):
+    _ensure_usage_log_in_state()
+    entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "api_key_label": api_key_label,
+        "model_id": model_id,
+        "file_name": file_name,
+        "file_size_bytes": file_size_bytes,
+        "duration_sec": round(duration_sec, 3),
+        "success": success,
+        "error": error_msg or "",
+    }
+    if meta:
+        entry.update(meta)
+    st.session_state["usage_log"].append(entry)
+    # Best-effort write to local file as well (ephemeral on some platforms)
+    try:
+        with open("usage_log.json", "w", encoding="utf-8") as f:
+            json.dump(st.session_state["usage_log"], f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def _download_bytes_button(label: str, data_bytes: bytes, file_name: str, mime: str):
+    st.download_button(label=label, data=data_bytes, file_name=file_name, mime=mime)
+
+
+# ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("Configuration")
 
-    # 1. API Key Setup
-    st.markdown("### ✅ API Key Setup")
-    api_key = None
+    # API Key selection: dropdown over GOOGLE_API_KEY_1..3 (default to _1). If none found, allow manual entry.
+    st.markdown("### ✅ API Key")
+    available_keys = _load_available_api_keys()
+    api_key_label: str = "MANUAL"
+    api_key: Optional[str] = None
 
-    # Try to load from Streamlit secrets first
-    loaded_from_secrets = False
-    try:
-        api_key = st.secrets["GOOGLE_API_KEY_1"]
-        loaded_from_secrets = True
-        st.success("API Key loaded from `st.secrets`.")
-    except (KeyError, AttributeError):
-        # Fallback to text input (hidden)
+    if available_keys:
+        labels = [f"{name} ({_mask_key(k)})" for name, k in available_keys]
+        default_idx = 0  # default to GOOGLE_API_KEY_1
+        sel_idx = st.selectbox("Select API Key", options=range(len(labels)), index=default_idx,
+                               format_func=lambda i: labels[i])
+        api_key_label, api_key = available_keys[sel_idx]
+        st.caption(f"Using API Key: **{_mask_key(api_key)}**")
+    else:
         api_key = st.text_input(
             "Enter your Google Gemini API Key",
             type="password",
             key="api_key_input",
-            help="For Streamlit Cloud, use `secrets.toml` with the key `GOOGLE_API_KEY_1`."
+            help="No keys found in secrets. Paste a key here."
         )
         if api_key:
-            st.success("API Key set via input.")
+            st.caption(f"Using API Key: **{_mask_key(api_key)}**")
         else:
-            st.warning("Please set your API Key to proceed.")
+            st.warning("Please provide an API key to proceed.")
 
-    # Masked API key preview (first 4 + last 4 chars) so you can verify the key without exposing it
-    def _mask_key(k: str) -> str:
-        if not k or len(k) < 8:
-            return "********"
-        return f"{k[:4]}...{k[-4:]}"
-
-    if api_key:
-        source_label = "secrets" if loaded_from_secrets else "input"
-        st.caption(f"Using API Key ({source_label}): **{_mask_key(api_key)}**")
-
-    # 2. Model Selection
-    st.markdown("### ⚙️ Select Model")
+    # Model selection
+    st.markdown("### ⚙️ Model")
     options = list(MODEL_CHOICES.keys())
-    default_index = options.index("Gemini 2.0 Flash") if "Gemini 2.0 Flash" in options else 0
-
+    default_model_idx = options.index("Gemini 2.0 Flash") if "Gemini 2.0 Flash" in options else 0
     selected_model_name_display = st.selectbox(
         "Choose the Gemini Model",
         options=options,
-        index=default_index,
+        index=default_model_idx,
         help="Flash = fast & cost-effective; Pro = higher quality but may be slower or restricted."
     )
-    # Convert display name back to the model ID for the API call
     MODEL_ID = MODEL_CHOICES[selected_model_name_display]
     st.info(f"Selected Model ID: `{MODEL_ID}`")
 
-    # 3. File Uploader
+    # File upload
     st.markdown("### ⬆️ Upload PDF")
-    uploaded_file = st.file_uploader(
-        "Upload a PDF Financial Statement",
-        type=["pdf"]
-    )
+    uploaded_file = st.file_uploader("Upload a PDF Financial Statement", type=["pdf"])
 
-# --- Main Application Logic ---
 
-# Status Check
+# ---------------- Main ----------------
 is_ready = (uploaded_file is not None) and (api_key is not None and api_key.strip() != "")
 
 if uploaded_file:
-    # Display file information after upload
     st.subheader("Uploaded File Details")
     c1, c2, c3 = st.columns(3)
     c1.metric("File Name", uploaded_file.name)
     c2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
-    c3.metric("Model Selected", MODEL_ID)  # Show which model will process this file
+    c3.metric("Model Selected", MODEL_ID)
+
+    # Optional local PDF stats (tokens estimate) if pymupdf present
+    pdf_stats = None
+    try:
+        uploaded_file.seek(0)
+        _fb = uploaded_file.read()
+        pdf_stats = _try_extract_pdf_text_stats(_fb)
+    except Exception:
+        pdf_stats = None
+
+    if pdf_stats:
+        with st.expander("📊 Local PDF Text Stats (approximate)", expanded=False):
+            st.write({
+                "Pages": pdf_stats["pages"],
+                "Characters": pdf_stats["char_count"],
+                "Words": pdf_stats["word_count"],
+                "Estimated Tokens (rough)": pdf_stats["estimated_tokens"],
+            })
 
     st.markdown("---")
+
     if not is_ready:
         st.error("Please complete the API Key and PDF upload steps in the sidebar.")
     else:
@@ -110,49 +217,115 @@ if uploaded_file:
 
         if start_button:
             try:
-                with st.spinner(f"Extracting data using **{MODEL_ID}**... This may take a moment."):
-                    # Read the file into bytes
-                    uploaded_file.seek(0)  # Ensure we read from the start of the file buffer
-                    file_bytes = uploaded_file.read()
+                uploaded_file.seek(0)
+                file_bytes = uploaded_file.read()
 
-                    # Get the extracted JSON data and any potential error
-                    extracted_data, error = extract_financial_statement(
+                t0 = time.time()
+                with st.spinner(f"Extracting data using **{MODEL_ID}**..."):
+                    extracted_data, raw_dump, error = extract_financial_statement(
                         api_key=api_key,
                         model_id=MODEL_ID,
                         pdf_file_path=uploaded_file.name,
                         file_bytes=file_bytes
                     )
+                duration = time.time() - t0
+
+                # Prepare usage metadata
+                meta = {
+                    "transactions": len(extracted_data.get("transaction_data", [])) if extracted_data else 0,
+                    "debit_count": extracted_data.get("debit_count") if extracted_data else None,
+                    "credit_count": extracted_data.get("credit_count") if extracted_data else None,
+                    "alerts_count": len(extracted_data.get("alerts", [])) if (extracted_data and extracted_data.get("alerts")) else 0,
+                    "estimated_tokens": (pdf_stats or {}).get("estimated_tokens"),
+                }
+
+                # Detect quota issues
+                quota_flag = _quota_or_rate_limit_suspected(error or "")
+                if quota_flag:
+                    meta["quota_suspected"] = True
+
+                _append_usage_log(
+                    api_key_label=api_key_label,
+                    model_id=MODEL_ID,
+                    file_name=uploaded_file.name,
+                    file_size_bytes=uploaded_file.size,
+                    duration_sec=duration,
+                    success=(error is None),
+                    error_msg=error,
+                    meta=meta
+                )
 
                 if error:
-                    # Show the error message from the core function
                     st.error(f"Extraction Failed: {error}")
 
-                    # A few possible causes to guide troubleshooting (non-intrusive hints)
+                    if quota_flag:
+                        st.warning(
+                            "It looks like the **free-tier limit or quota** might have been reached for this API key. "
+                            "Please switch to another key in the sidebar (e.g., GOOGLE_API_KEY_2 or _3) and try again."
+                        )
+
+                    # Provide raw-response download options to avoid wasting the run
+                    st.subheader("Backup: Raw Gemini Response")
+                    if raw_dump:
+                        base_name = os.path.splitext(uploaded_file.name)[0]
+
+                        # Raw JSON dump (model id + response_text + candidates_texts)
+                        raw_json_bytes = json.dumps(raw_dump, ensure_ascii=False, indent=2).encode("utf-8")
+                        st.download_button(
+                            label="⬇️ Download Raw Response (.json)",
+                            data=raw_json_bytes,
+                            file_name=f"{base_name}_gemini_raw.json",
+                            mime="application/json"
+                        )
+
+                        # Raw TXT for easy manual inspection
+                        raw_txt = ""
+                        if raw_dump.get("response_text"):
+                            raw_txt += "=== response_text ===\n" + str(raw_dump["response_text"]) + "\n\n"
+                        if raw_dump.get("candidates_texts"):
+                            for i, t in enumerate(raw_dump["candidates_texts"], 1):
+                                raw_txt += f"=== candidate {i} ===\n{t}\n\n"
+                        if raw_txt:
+                            st.download_button(
+                                label="⬇️ Download Raw Response (.txt)",
+                                data=raw_txt.encode("utf-8"),
+                                file_name=f"{base_name}_gemini_raw.txt",
+                                mime="text/plain"
+                            )
+                        else:
+                            st.info("No raw text available from the model response.")
+
                     with st.expander("Troubleshooting tips"):
                         st.markdown(
                             "- Ensure the API key is valid and has access to the selected model.\n"
                             "- Try a text-based (non-scanned) PDF under ~20MB.\n"
                             "- If the PDF is scanned, try a clearer copy; OCR quality matters.\n"
                             "- Try another model (e.g., Gemini 2.5 Flash vs 2.0 Flash).\n"
-                            "- If the error mentions JSON parsing: the model returned extra text—please retry once."
+                            "- Download the raw response (above) to avoid losing this run."
                         )
 
-                elif extracted_data:
+                else:
                     st.success("🎉 Data Extraction Complete!")
 
-                    # 1. Display Header/Summary Data
+                    # Alerts (unusual activity)
+                    alerts = extracted_data.get("alerts", [])
+                    if alerts:
+                        with st.expander("⚠️ Unusual Activity / Transaction Alerts", expanded=True):
+                            for a in alerts:
+                                st.markdown(f"- {a}")
+
+                    # Summary
                     st.subheader("Summary Information")
-
                     summary_cols = [
-                        'institution_name', 'account_holder_name',
-                        'statement_period', 'initial_balance', 'closing_balance'
+                        "institution_name", "account_holder_name", "statement_period",
+                        "initial_balance", "closing_balance", "total_debit_amount",
+                        "total_credit_amount", "debit_count", "credit_count"
                     ]
-                    summary_data = {k.replace('_', ' ').title(): extracted_data.get(k) for k in summary_cols}
-
+                    summary_data = {k.replace("_", " ").title(): extracted_data.get(k) for k in summary_cols}
                     summary_df = pd.DataFrame(summary_data.items(), columns=["Field", "Value"])
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-                    # 2. Display Transaction Data (First 10 rows preview)
+                    # Transactions Preview
                     st.subheader("Transaction Data Preview")
                     transaction_list = extracted_data.get("transaction_data", [])
                     if transaction_list:
@@ -160,17 +333,13 @@ if uploaded_file:
                         st.dataframe(df_preview.head(10), use_container_width=True)
                         st.info(f"Successfully extracted **{len(transaction_list)}** transactions. Download the full file below.")
 
-                        # 3. Create and offer the Excel file for download
+                        # Excel download of structured data
                         excel_buffer = json_to_excel_buffer(extracted_data)
-
-                        # Determine the output filename (match input)
                         base_name = os.path.splitext(uploaded_file.name)[0]
-                        output_filename = f"{base_name}_extracted.xlsx"
-
                         st.download_button(
                             label="⬇️ Download Extracted Data as Excel (.xlsx)",
                             data=excel_buffer,
-                            file_name=output_filename,
+                            file_name=f"{base_name}_extracted.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     else:
@@ -179,5 +348,31 @@ if uploaded_file:
                             "Try a different model or ensure the PDF contains a clearly formatted transaction table."
                         )
 
+                    # Always offer raw response downloads as backup (even on success)
+                    if raw_dump:
+                        with st.expander("Backup: Raw Gemini Response (for auditing)", expanded=False):
+                            base_name = os.path.splitext(uploaded_file.name)[0]
+                            raw_json_bytes = json.dumps(raw_dump, ensure_ascii=False, indent=2).encode("utf-8")
+                            st.download_button(
+                                label="⬇️ Download Raw Response (.json)",
+                                data=raw_json_bytes,
+                                file_name=f"{base_name}_gemini_raw.json",
+                                mime="application/json"
+                            )
+
             except Exception as e:
                 st.error(f"An unexpected application error occurred: {e}")
+
+
+# ---------------- Usage Log Downloads ----------------
+st.markdown("---")
+st.subheader("📜 Usage & Quota Log")
+_ensure_usage_log_in_state()
+log_json = json.dumps(st.session_state["usage_log"], ensure_ascii=False, indent=2).encode("utf-8")
+st.download_button(
+    label="⬇️ Download usage_log.json",
+    data=log_json,
+    file_name="usage_log.json",
+    mime="application/json"
+)
+st.caption("This includes timestamp, API key label, model, file, duration, success/error, and basic metrics per run.")
