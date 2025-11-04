@@ -48,34 +48,22 @@ def extract_financial_statement(
     file_bytes: bytes,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Extracts structured financial statement data from a PDF using the Gemini API.
-
-    Args:
-        api_key: Your Google Gemini API key.
-        model_id: The Gemini model to use (e.g., 'gemini-2.5-flash').
-        pdf_file_path: The name of the uploaded file.
-        file_bytes: The actual bytes of the uploaded PDF file.
-
-    Returns:
-        A tuple: (Extracted JSON data as a dict, Error message string)
+    Extracts structured financial statement data from a PDF using the Gemini API 
+    via the reliable Part.from_bytes() method (inline file transfer).
+    NOTE: This method is best for files under 20MB.
     """
-    uploaded_file_handle = None
     try:
         # Initialize the client
         client = genai.Client(api_key=api_key)
 
-        # 1. Upload the file to the Gemini File API
-        # FIX for google-genai==1.46.0: The older API requires a simple positional file object.
-        # It relies on the environment or the byte stream itself to infer the type.
-        # We also manually set the filename if the API doesn't pick it up naturally.
-        uploaded_file_handle = client.files.upload(
-            file=io.BytesIO(file_bytes),
-            # In this version, we pass the filename separately for display purposes only if the simple upload fails.
-            # However, for stability, we rely on the internal file object in BytesIO.
+        # 1. Define the PDF content part using bytes and explicit mime_type.
+        # This bypasses client.files.upload() which was causing the MIME type/keyword argument issues.
+        pdf_part = types.Part.from_bytes(
+            data=file_bytes,
+            mime_type="application/pdf"
         )
-        # Note: The older SDK version sometimes names the file using the context if available.
 
-        # 2. Create the prompt
+        # 2. Create the prompt 
         PROMPT = (
             "You are an expert financial data extraction bot. "
             "From the uploaded Financial Statement PDF document, meticulously extract "
@@ -89,31 +77,19 @@ def extract_financial_statement(
         print(f"Sending request to {model_id} for structured extraction...")
         response = client.models.generate_content(
             model=model_id,
-            contents=[PROMPT, uploaded_file_handle], # Use the file handle
+            contents=[PROMPT, pdf_part], # Contents now include the prompt text and the PDF bytes part
             config=types.GenerateContentConfig(
-                # Force the model to return a JSON object matching the Pydantic schema
                 response_mime_type="application/json",
-                response_schema=ExtractedFinancialStatement, # Use the updated Pydantic model
+                response_schema=ExtractedFinancialStatement,
             ),
         )
 
-        # 4. Process the response and clean up
+        # 4. Process the response. (No cleanup needed as the file was sent inline)
         extracted_data = json.loads(response.text)
-
-        # Clean up the uploaded file (crucial for good practice)
-        client.files.delete(name=uploaded_file_handle.name)
-        print(f"Successfully deleted temporary file: {uploaded_file_handle.name}")
 
         return extracted_data, None
 
     except Exception as e:
-        # Clean up the file if it was uploaded but the API call failed
-        if uploaded_file_handle:
-             try:
-                 client.files.delete(name=uploaded_file_handle.name)
-             except Exception as cleanup_e:
-                 print(f"Cleanup failed: {cleanup_e}") # Non-critical failure
-
         # Catch and return any API or JSON parsing errors
         return None, f"An error occurred during extraction: {e}"
 

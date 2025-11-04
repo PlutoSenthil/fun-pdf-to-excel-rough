@@ -9,11 +9,13 @@ from typing import Dict, Any
 # --- Model Configuration for Dropdown ---
 # Using the model IDs and descriptions based on the table you provided.
 MODEL_CHOICES = {
-    "Gemini 2.5 Flash (1 RPM, 4.37K TPM)": "gemini-2.5-flash",
-    "Gemini 2.5 Pro (0 RPM, 0 TPM)": "gemini-2.5-pro",
-    "Gemini 2.0 Flash (0 RPM, 0 TPM)": "gemini-2.0-flash",
-    "Gemini 2.5 Flash Lite (0 RPM, 0 TPM)": "gemini-2.5-flash-lite",
-    # Added other models from your list, though their usage rates are 0 in your table
+    "gemini-2.5-flash (1 RPM, 4.37K TPM)": "gemini-2.5-flash",
+    "gemini-2.5-pro (0 RPM, 0 TPM)": "gemini-2.5-pro",
+    "gemini-2.0-flash (0 RPM, 0 TPM)": "gemini-2.0-flash",
+    "gemini-2.5-flash-lite (0 RPM, 0 TPM)": "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite (0 RPM, 0 TPM)": "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-exp (0 RPM, 0 TPM)": "gemini-2.0-flash-exp",
+    "learnlm-2.0-flash-experimental (0 RPM, 0 TPM)": "learnlm-2.0-flash-experimental",
 }
 
 # --- Streamlit UI Setup ---
@@ -25,10 +27,6 @@ st.set_page_config(
 
 st.title("📄 Gemini-Powered Financial Statement Extractor")
 st.markdown("Upload a **PDF Financial Statement** and use a Gemini model to extract structured transaction data into an Excel file.")
-
-# Initialize session state for proper flow control
-if 'api_key_status' not in st.session_state:
-    st.session_state['api_key_status'] = 'Pending'
 
 # --- Sidebar for Configuration ---
 with st.sidebar:
@@ -42,32 +40,30 @@ with st.sidebar:
     try:
         api_key = st.secrets["GOOGLE_API_KEY_1"]
         st.success("API Key loaded successfully from `st.secrets`.")
-        st.session_state['api_key_status'] = 'Ready'
     except (KeyError, AttributeError):
         # Fallback to text input
         api_key = st.text_input(
             "Enter your Google Gemini API Key", 
             type="password",
+            key="api_key_input",
             help="For Streamlit Cloud, use `secrets.toml` with the key `GOOGLE_API_KEY_1`."
         )
         if api_key:
-            st.session_state['api_key_status'] = 'Ready'
             st.success("API Key set via input.")
         else:
-            st.session_state['api_key_status'] = 'Pending'
             st.warning("Please set your API Key to proceed.")
 
     # 2. Model Selection
     st.markdown("### ⚙️ Select Model")
-    selected_model_name = st.selectbox(
+    selected_model_name_display = st.selectbox(
         "Choose the Gemini Model",
         options=list(MODEL_CHOICES.keys()),
         index=0, # Default to Flash 2.5
         help="The model ID in parentheses reflects the current usage rates in the table you provided."
     )
     # Convert display name back to the model ID for the API call
-    MODEL_ID = MODEL_CHOICES[selected_model_name]
-    st.info(f"Using Model ID: `{MODEL_ID}`")
+    MODEL_ID = MODEL_CHOICES[selected_model_name_display]
+    st.info(f"Selected Model ID: `{MODEL_ID}`")
 
     # 3. File Uploader
     st.markdown("### ⬆️ Upload PDF")
@@ -84,14 +80,10 @@ is_ready = (uploaded_file is not None) and (api_key is not None and api_key != "
 if uploaded_file:
     # Display file information after upload
     st.subheader("Uploaded File Details")
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     col1.metric("File Name", uploaded_file.name)
     col2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
-    
-    # The actual page count requires parsing, so we'll leave it as a placeholder or remove it.
-    # col3.metric("Page Count", "TBD") # Removed as it requires another library (pypdf, etc.)
 
-    # New: Start Button
     st.markdown("---")
     if not is_ready:
         st.error("Please complete the API Key and PDF upload steps in the sidebar.")
@@ -102,9 +94,10 @@ if uploaded_file:
             # Use a try-except block for the main process
             try:
                 # Display a progress indicator
-                with st.spinner(f"Extracting data using {MODEL_ID}... This may take a moment."):
+                with st.spinner(f"Extracting data using **{MODEL_ID}**... This may take a moment."):
                     
                     # Read the file into bytes
+                    uploaded_file.seek(0) # Ensure we read from the start of the file buffer
                     file_bytes = uploaded_file.read()
                     
                     # Get the extracted JSON data and any potential error
@@ -125,11 +118,9 @@ if uploaded_file:
                     # 1. Display Header/Summary Data
                     st.subheader("Summary Information")
                     
-                    # Prepare data for display
                     summary_cols = ['institution_name', 'account_holder_name', 'statement_period', 'initial_balance', 'closing_balance']
                     summary_data = {k.replace('_', ' ').title(): extracted_data.get(k) for k in summary_cols}
                     
-                    # Use a clean dataframe view for the summary
                     summary_df = pd.DataFrame(summary_data.items(), columns=["Field", "Value"])
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
