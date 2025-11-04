@@ -64,34 +64,38 @@ class GeminiExtractor:
     Handles uploading PDFs to Google Gemini File API, requesting a structured JSON
     that conforms to the Pydantic schema, and converting it to Excel.
     """
-
-    def __init__(self, api_key: str, model_id: str = "gemini-2.5-flash", prompt: str = DEFAULT_PROMPT):
+    def __init__(self, api_key: str, model_id: str = "gemini-2.5-flash", prompt: Optional[str] = None):
         if not api_key:
             raise ValueError("A valid GOOGLE_API_KEY is required.")
         self.client = genai.Client(api_key=api_key)
         self.model_id = model_id
-        self.prompt = prompt
-
-    # ---------- Internal helpers ----------
-
-    def _upload_pdf(self, pdf_path: str):
-        """Upload a local PDF path to Gemini's File API."""
-        return self.client.files.upload(file=pdf_path)
+        self.prompt = (prompt or DEFAULT_PROMPT).strip()
 
     def _call_model_for_json(self, file_obj) -> str:
-        """
-        Ask Gemini to return structured JSON strictly per ExtractedBankStatement schema.
-        Returns a JSON string.
-        """
+        user_message = types.Content(
+            role="user",
+            parts=[
+                types.Part.from_text(self.prompt),
+                file_obj,
+            ],
+        )
+
         response = self.client.models.generate_content(
             model=self.model_id,
-            contents=[self.prompt, file_obj],
+            contents=[user_message],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=ExtractedBankStatement,
             ),
         )
         return response.text
+
+
+    # ---------- Internal helpers ----------
+
+    def _upload_pdf(self, pdf_path: str):
+        """Upload a local PDF path to Gemini's File API."""
+        return self.client.files.upload(file=pdf_path)
 
     def _json_to_dataframe(self, extracted: dict) -> pd.DataFrame:
         txns = extracted.get("transaction_data", []) or []
