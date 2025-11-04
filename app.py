@@ -88,7 +88,8 @@ if uploaded_file and api_key:
         uploaded_file.seek(0)
         file_bytes = uploaded_file.read()
         with st.spinner("Extracting data..."):
-            data, error = extract_financial_statement(api_key, MODEL_ID, file_bytes)
+            # CORRECTED LINE: passing file_bytes as a keyword argument
+            data, error = extract_financial_statement(api_key, MODEL_ID, file_bytes=file_bytes)
 
         if error:
             st.error(error)
