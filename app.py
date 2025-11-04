@@ -1,7 +1,8 @@
-import streamlit as st
 import os
-import pandas as pd
 from typing import Dict, Any
+
+import pandas as pd
+import streamlit as st
 
 from gemini import extract_financial_statement, json_to_excel_buffer
 
@@ -44,7 +45,7 @@ with st.sidebar:
         loaded_from_secrets = True
         st.success("API Key loaded from `st.secrets`.")
     except (KeyError, AttributeError):
-        # Fallback to text input
+        # Fallback to text input (hidden)
         api_key = st.text_input(
             "Enter your Google Gemini API Key",
             type="password",
@@ -132,7 +133,8 @@ if uploaded_file:
                             "- Ensure the API key is valid and has access to the selected model.\n"
                             "- Try a text-based (non-scanned) PDF under ~20MB.\n"
                             "- If the PDF is scanned, try a clearer copy; OCR quality matters.\n"
-                            "- Try another model (e.g., Gemini 2.5 Flash vs 2.0 Flash)."
+                            "- Try another model (e.g., Gemini 2.5 Flash vs 2.0 Flash).\n"
+                            "- If the error mentions JSON parsing: the model returned extra text—please retry once."
                         )
 
                 elif extracted_data:

@@ -1,11 +1,13 @@
 import io
 import json
-import pandas as pd
+import re
 from typing import List, Optional, Dict, Any, Tuple
+
+import pandas as pd
+from pydantic import BaseModel, Field
 
 from google import genai
 from google.genai import types
-from pydantic import BaseModel, Field
 
 
 # --- Pydantic Models ---
@@ -43,6 +45,69 @@ class ExtractedFinancialStatement(BaseModel):
     closing_balance: float = Field(description="The final balance of the account at the end of the statement period.")
 
 
+# ----------------- JSON parsing hardener -----------------
+
+_CODE_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE | re.MULTILINE)
+
+def _strip_code_fences(s: str) -> str:
+    # Remove markdown code fences like ```json ... ```
+    return _CODE_FENCE_RE.sub("", s).strip()
+
+def _try_json_loads(s: str) -> Optional[Dict[str, Any]]:
+    try:
+        obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
+        return None
+    except Exception:
+        return None
+
+def _extract_first_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """
+    Extract the first well-formed top-level JSON object from arbitrary text.
+    Strategy:
+      - Strip code fences
+      - Scan for '{' and attempt to decode using a moving window that ends
+        where braces balance to zero.
+    """
+    cleaned = _strip_code_fences(text)
+
+    # Quick attempt: whole text might already be JSON
+    whole = _try_json_loads(cleaned)
+    if whole is not None:
+        return whole
+
+    # Scan for the largest valid JSON object
+    start_positions = [m.start() for m in re.finditer(r"\{", cleaned)]
+    for start in start_positions:
+        depth = 0
+        in_str = False
+        esc = False
+        for idx in range(start, len(cleaned)):
+            ch = cleaned[idx]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+            else:
+                if ch == '"':
+                    in_str = True
+                elif ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        candidate = cleaned[start : idx + 1]
+                        obj = _try_json_loads(candidate)
+                        if obj is not None:
+                            return obj
+        # If we exit loop, that start didn't terminate cleanly; try next start
+    return None
+
+
 # --- Core Function to Interact with Gemini ---
 
 def extract_financial_statement(
@@ -64,7 +129,7 @@ def extract_financial_statement(
 
         client = genai.Client(api_key=api_key)
 
-        # Crucial: pass explicit mime_type. Do NOT pass 'filename' – not supported in some SDK versions.
+        # Important: explicit mime_type; do NOT pass filename (not supported on some versions).
         pdf_part = types.Part.from_bytes(
             data=file_bytes,
             mime_type="application/pdf",
@@ -88,26 +153,37 @@ def extract_financial_statement(
             ),
         )
 
-        # Safer parsing: prefer parsed -> text -> candidates fallback
-        extracted_data: Optional[Dict[str, Any]] = None
-
+        # ---------- Robust parsing ----------
+        # 1) Prefer structured parse if present
         if hasattr(response, "parsed") and response.parsed:
             parsed = response.parsed
-            # 'parsed' may be a dict or Pydantic model instance
             if isinstance(parsed, dict):
-                extracted_data = parsed
-            elif hasattr(parsed, "model_dump"):
-                extracted_data = parsed.model_dump()
-        if extracted_data is None and hasattr(response, "text") and response.text:
-            extracted_data = json.loads(response.text)
-        if extracted_data is None:
-            # Fallback to candidates (defensive)
-            try:
-                extracted_data = json.loads(response.candidates[0].content.parts[0].text)
-            except Exception:
-                return None, "Model returned no JSON content."
+                return parsed, None
+            if hasattr(parsed, "model_dump"):
+                return parsed.model_dump(), None
 
-        return extracted_data, None
+        # 2) Try response.text (may contain extra formatting)
+        if hasattr(response, "text") and response.text:
+            obj = _extract_first_json_object(response.text)
+            if obj is not None:
+                return obj, None
+
+        # 3) Fallback: try candidates parts
+        try:
+            candidates = getattr(response, "candidates", []) or []
+            for c in candidates:
+                parts = getattr(getattr(c, "content", None), "parts", []) or []
+                for p in parts:
+                    p_text = getattr(p, "text", None)
+                    if p_text:
+                        obj = _extract_first_json_object(p_text)
+                        if obj is not None:
+                            return obj, None
+        except Exception:
+            pass
+
+        # Nothing worked
+        return None, "Model returned content that could not be parsed into valid JSON."
 
     except Exception as e:
         # Return clear error to UI
