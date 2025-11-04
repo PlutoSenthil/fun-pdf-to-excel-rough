@@ -1,4 +1,5 @@
-streamlit
 google-genai
+pydantic
 pandas
-openpyxl
+streamlit
+openpyxl # Needed by pandas to write to .xlsx files
