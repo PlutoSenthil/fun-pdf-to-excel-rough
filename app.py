@@ -10,11 +10,11 @@ from gemini import extract_financial_statement, json_to_excel_buffer
 
 # ---------------- Essentials: Model list ----------------
 MODEL_CHOICES = {
-    "Gemini 2.5 Flash": "gemini-2.5-flash",
-    "Gemini 2.5 Pro": "gemini-2.5-pro",
-    "Gemini 2.0 Flash": "gemini-2.0-flash",  # default
+    "Gemini 2.5 Flash": "gemini-2.5-flash", # default
     "Gemini 2.5 Flash Lite": "gemini-2.5-flash-lite",
+    "Gemini 2.0 Flash": "gemini-2.0-flash",  
     "Gemini 2.0 Flash Lite": "gemini-2.0-flash-lite",
+    "Gemini 2.5 Pro": "gemini-2.5-pro",
     "Gemini 2.0 Flash Experimental": "gemini-2.0-flash-exp",
     "LearnLM 2.0 Flash Experimental": "learnlm-2.0-flash-experimental",
 }
@@ -84,7 +84,7 @@ with st.sidebar:
     # Model selection
     st.markdown("### ⚙️ Model")
     options = list(MODEL_CHOICES.keys())
-    default_model_idx = options.index("Gemini 2.0 Flash") if "Gemini 2.0 Flash" in options else 0
+    default_model_idx = options.index("Gemini 2.5 Flash") if "Gemini 2.5 Flash" in options else 0
     model_display = st.selectbox("Choose the Gemini Model", options=options, index=default_model_idx)
     MODEL_ID = MODEL_CHOICES[model_display]
     st.info(f"Selected Model ID: `{MODEL_ID}`")
