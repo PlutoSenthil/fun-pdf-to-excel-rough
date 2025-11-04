@@ -72,11 +72,17 @@ class GeminiExtractor:
         self.prompt = (prompt or DEFAULT_PROMPT).strip()
 
     def _call_model_for_json(self, file_obj) -> str:
+        """
+        Build a single user content message with two parts:
+        - the textual instruction (string)
+        - the uploaded File reference
+        The SDK will coerce these into the proper Content/Part types.
+        """
         user_message = types.Content(
             role="user",
             parts=[
-                types.Part.from_text(self.prompt),
-                file_obj,
+                self.prompt,   # ✅ plain string is allowed as a Part
+                file_obj,      # ✅ uploaded File handle from client.files.upload(...)
             ],
         )
 
@@ -89,6 +95,7 @@ class GeminiExtractor:
             ),
         )
         return response.text
+
 
 
     # ---------- Internal helpers ----------
