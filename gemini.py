@@ -48,30 +48,28 @@ class ExtractedFinancialStatement(BaseModel):
 def extract_financial_statement(
     api_key: str,
     model_id: str,
-    pdf_file_path: str,  # File path/handle from Streamlit
+    pdf_file_path: str,  # File path/handle from Streamlit (for display only)
     file_bytes: bytes,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
     Extracts structured financial statement data from a PDF using the Gemini API
-    via the reliable Part.from_bytes() method (inline file transfer).
-    NOTE: This method is best for files under 20MB.
+    via Part.from_bytes() (inline bytes). Best for files under ~20MB.
+
+    Returns:
+        (extracted_dict, None) on success; (None, error_message) on failure.
     """
     try:
         if not api_key:
             return None, "Missing API key."
 
-        # Initialize the client
         client = genai.Client(api_key=api_key)
 
-        # 1. Define the PDF content part using bytes and explicit mime_type.
-        # Important: include a filename to avoid 'Unknown mime type' errors.
+        # Crucial: pass explicit mime_type. Do NOT pass 'filename' – not supported in some SDK versions.
         pdf_part = types.Part.from_bytes(
             data=file_bytes,
             mime_type="application/pdf",
-            filename=pdf_file_path if pdf_file_path else "statement.pdf",
         )
 
-        # 2. Create the prompt
         PROMPT = (
             "You are an expert financial data extraction bot. "
             "From the uploaded Financial Statement PDF document, meticulously extract "
@@ -81,25 +79,38 @@ def extract_financial_statement(
             "Adhere strictly to the requested JSON schema. All amounts must be positive floats."
         )
 
-        # 3. Call the Gemini API for structured content
-        # Keep logic same—use response_schema and expect JSON back.
         response = client.models.generate_content(
             model=model_id,
-            contents=[PROMPT, pdf_part],  # prompt + PDF bytes part
+            contents=[PROMPT, pdf_part],
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=ExtractedFinancialStatement,
             ),
         )
 
-        # 4. Process the response
-        # Keep your original approach; parse response.text.
-        extracted_data = json.loads(response.text)
+        # Safer parsing: prefer parsed -> text -> candidates fallback
+        extracted_data: Optional[Dict[str, Any]] = None
+
+        if hasattr(response, "parsed") and response.parsed:
+            parsed = response.parsed
+            # 'parsed' may be a dict or Pydantic model instance
+            if isinstance(parsed, dict):
+                extracted_data = parsed
+            elif hasattr(parsed, "model_dump"):
+                extracted_data = parsed.model_dump()
+        if extracted_data is None and hasattr(response, "text") and response.text:
+            extracted_data = json.loads(response.text)
+        if extracted_data is None:
+            # Fallback to candidates (defensive)
+            try:
+                extracted_data = json.loads(response.candidates[0].content.parts[0].text)
+            except Exception:
+                return None, "Model returned no JSON content."
 
         return extracted_data, None
 
     except Exception as e:
-        # Catch and return any API or JSON parsing errors
+        # Return clear error to UI
         return None, f"An error occurred during extraction: {e}"
 
 
@@ -109,27 +120,21 @@ def json_to_excel_buffer(json_data: Dict[str, Any]) -> io.BytesIO:
     """
     Converts the extracted JSON data into an Excel buffer (in-memory file).
     """
-    # 1. Create the DataFrame from the 'transaction_data' list
     transaction_list = json_data.get("transaction_data", [])
     df = pd.DataFrame(transaction_list)
 
-    # 2. Create an in-memory buffer
     output = io.BytesIO()
-
-    # 3. Use an ExcelWriter to write data and metadata to different sheets
-    # Using openpyxl since it's in your dependency list.
+    # Use openpyxl (in your dependency list)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # Write Transaction Data to the first sheet
+        # Transactions
         df.to_excel(writer, sheet_name="Transactions", index=False)
 
-        # Write Header/Summary Data to the second sheet (Metadata)
+        # Summary
         metadata = {k: v for k, v in json_data.items() if k != "transaction_data"}
-
-        # Convert dictionary to a two-column DataFrame for a clean look
         metadata_df = pd.DataFrame(list(metadata.items()), columns=["Field", "Value"])
         metadata_df.to_excel(writer, sheet_name="Summary", index=False)
 
-        # Auto-adjust column widths for readability (approximation for openpyxl)
+        # Auto-width (approximate) for openpyxl
         ws_t = writer.sheets["Transactions"]
         for i, col in enumerate(df.columns, start=1):
             max_len = max((df[col].astype(str).str.len().max() if not df.empty else 0), len(col)) + 2
@@ -140,6 +145,5 @@ def json_to_excel_buffer(json_data: Dict[str, Any]) -> io.BytesIO:
             max_len = max((metadata_df[col].astype(str).str.len().max() if not metadata_df.empty else 0), len(col)) + 2
             ws_s.column_dimensions[ws_s.cell(row=1, column=i).column_letter].width = max_len
 
-    # Move the buffer's cursor to the beginning
     output.seek(0)
     return output

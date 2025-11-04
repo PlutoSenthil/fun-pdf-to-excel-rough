@@ -1,11 +1,12 @@
 import streamlit as st
 import os
 import pandas as pd
-from gemini import extract_financial_statement, json_to_excel_buffer
 from typing import Dict, Any
 
+from gemini import extract_financial_statement, json_to_excel_buffer
+
 # --- Model Configuration for Dropdown ---
-# NOTE: Set default label to "Gemini 2.0 Flash" -> "gemini-2.0-flash"
+# Default should be "Gemini 2.0 Flash": "gemini-2.0-flash"
 MODEL_CHOICES = {
     "Gemini 2.5 Flash": "gemini-2.5-flash",
     "Gemini 2.5 Pro": "gemini-2.5-pro",
@@ -24,7 +25,9 @@ st.set_page_config(
 )
 
 st.title("📄 Gemini-Powered Financial Statement Extractor")
-st.markdown("Upload a **PDF Financial Statement** and use a Gemini model to extract structured transaction data into an Excel file.")
+st.markdown(
+    "Upload a **PDF Financial Statement** and use a Gemini model to extract structured transaction data into an Excel file."
+)
 
 # --- Sidebar for Configuration ---
 with st.sidebar:
@@ -35,9 +38,11 @@ with st.sidebar:
     api_key = None
 
     # Try to load from Streamlit secrets first
+    loaded_from_secrets = False
     try:
         api_key = st.secrets["GOOGLE_API_KEY_1"]
-        st.success("API Key loaded successfully from `st.secrets`.")
+        loaded_from_secrets = True
+        st.success("API Key loaded from `st.secrets`.")
     except (KeyError, AttributeError):
         # Fallback to text input
         api_key = st.text_input(
@@ -51,17 +56,26 @@ with st.sidebar:
         else:
             st.warning("Please set your API Key to proceed.")
 
+    # Masked API key preview (first 4 + last 4 chars) so you can verify the key without exposing it
+    def _mask_key(k: str) -> str:
+        if not k or len(k) < 8:
+            return "********"
+        return f"{k[:4]}...{k[-4:]}"
+
+    if api_key:
+        source_label = "secrets" if loaded_from_secrets else "input"
+        st.caption(f"Using API Key ({source_label}): **{_mask_key(api_key)}**")
+
     # 2. Model Selection
     st.markdown("### ⚙️ Select Model")
     options = list(MODEL_CHOICES.keys())
-    # Default to "Gemini 2.0 Flash"
     default_index = options.index("Gemini 2.0 Flash") if "Gemini 2.0 Flash" in options else 0
 
     selected_model_name_display = st.selectbox(
         "Choose the Gemini Model",
         options=options,
         index=default_index,
-        help="Flash is fast and cost-effective; Pro is higher quality but may be slower or restricted."
+        help="Flash = fast & cost-effective; Pro = higher quality but may be slower or restricted."
     )
     # Convert display name back to the model ID for the API call
     MODEL_ID = MODEL_CHOICES[selected_model_name_display]
@@ -77,14 +91,15 @@ with st.sidebar:
 # --- Main Application Logic ---
 
 # Status Check
-is_ready = (uploaded_file is not None) and (api_key is not None and api_key != "")
+is_ready = (uploaded_file is not None) and (api_key is not None and api_key.strip() != "")
 
 if uploaded_file:
     # Display file information after upload
     st.subheader("Uploaded File Details")
-    col1, col2 = st.columns(2)
-    col1.metric("File Name", uploaded_file.name)
-    col2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("File Name", uploaded_file.name)
+    c2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
+    c3.metric("Model Selected", MODEL_ID)  # Show which model will process this file
 
     st.markdown("---")
     if not is_ready:
@@ -93,11 +108,8 @@ if uploaded_file:
         start_button = st.button("🚀 Start Data Extraction", type="primary")
 
         if start_button:
-            # Use a try-except block for the main process
             try:
-                # Display a progress indicator
                 with st.spinner(f"Extracting data using **{MODEL_ID}**... This may take a moment."):
-
                     # Read the file into bytes
                     uploaded_file.seek(0)  # Ensure we read from the start of the file buffer
                     file_bytes = uploaded_file.read()
@@ -114,13 +126,25 @@ if uploaded_file:
                     # Show the error message from the core function
                     st.error(f"Extraction Failed: {error}")
 
+                    # A few possible causes to guide troubleshooting (non-intrusive hints)
+                    with st.expander("Troubleshooting tips"):
+                        st.markdown(
+                            "- Ensure the API key is valid and has access to the selected model.\n"
+                            "- Try a text-based (non-scanned) PDF under ~20MB.\n"
+                            "- If the PDF is scanned, try a clearer copy; OCR quality matters.\n"
+                            "- Try another model (e.g., Gemini 2.5 Flash vs 2.0 Flash)."
+                        )
+
                 elif extracted_data:
                     st.success("🎉 Data Extraction Complete!")
 
                     # 1. Display Header/Summary Data
                     st.subheader("Summary Information")
 
-                    summary_cols = ['institution_name', 'account_holder_name', 'statement_period', 'initial_balance', 'closing_balance']
+                    summary_cols = [
+                        'institution_name', 'account_holder_name',
+                        'statement_period', 'initial_balance', 'closing_balance'
+                    ]
                     summary_data = {k.replace('_', ' ').title(): extracted_data.get(k) for k in summary_cols}
 
                     summary_df = pd.DataFrame(summary_data.items(), columns=["Field", "Value"])
@@ -148,8 +172,10 @@ if uploaded_file:
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     else:
-                        st.warning("The model returned summary data but no transactions were found in the PDF. Please try a different model.")
+                        st.warning(
+                            "The model returned summary data but no transactions were found in the PDF. "
+                            "Try a different model or ensure the PDF contains a clearly formatted transaction table."
+                        )
 
             except Exception as e:
-                # Catch any unexpected application-level errors
                 st.error(f"An unexpected application error occurred: {e}")
