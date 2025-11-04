@@ -60,7 +60,7 @@ class ExtractedFinancialStatement(BaseModel):
     )
     closing_balance: float = Field(description="The final balance of the account at the end of the statement period.")
 
-    # OPTIONAL COUNTS (with fallback computation in code)
+    # OPTIONAL COUNTS (fallback computed if missing)
     debit_count: Optional[int] = Field(
         None, description="The total number of debit transactions in the statement."
     )
@@ -137,7 +137,7 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
     - IQR outliers in debits/credits
     - Adjacent reversal pairs (equal/opposite amounts)
     - High-frequency same-day repeats (same description+amount)
-    Returns list of alert strings (never raises).
+    Returns a list of alert strings (never raises).
     """
     alerts = []
     tx = payload.get("transaction_data") or []
@@ -161,10 +161,10 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
     # Negative balance
     neg_rows = [i for i, bal, _ in balances if bal < 0]
     if neg_rows:
-        alerts.append(f"Negative balances detected in {len(neg_rows)} row(s): e.g., row {neg_rows[0]+1}.")
+        alerts.append(f"Negative balances detected in {len(neg_rows)} row(s); first at row {neg_rows[0]+1}.")
 
     # IQR outliers
-    def iqr_outliers(values: List[Tuple[int, float, Dict[str, Any]]], label: str):
+    def iqr_outliers(values: List[tuple], label: str):
         if len(values) < 8:
             return
         sorted_vals = sorted(values, key=lambda t: t[1])
@@ -175,17 +175,17 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
         q3 = amounts[q3_idx]
         iqr = max(q3 - q1, 0)
         threshold = q3 + 1.5 * iqr if iqr > 0 else (q3 * 2.5 if q3 > 0 else 0)
-        outs = [(i, v, r) for i, v, r in values if v > threshold and threshold > 0]
+        outs = [(i, v, r) for i, v, r in values if threshold > 0 and v > threshold]
         if outs:
             e = outs[0]
             alerts.append(
-                f"Unusually large {label} detected (IQR rule): {len(outs)} outlier(s), e.g., row {e[0]+1} amount {e[1]:,.2f}."
+                f"Unusually large {label} detected: {len(outs)} outlier(s); example row {e[0]+1} amount {e[1]:,.2f}."
             )
 
     iqr_outliers(debits, "debit(s)")
     iqr_outliers(credits, "credit(s)")
 
-    # Reversal detection (adjacent equal amount opposite signs)
+    # Reversal detection (adjacent equal amount opposite sides)
     for i in range(len(tx) - 1):
         r1, r2 = tx[i], tx[i + 1]
         wd1, cr1 = r1.get("withdrawal_amount"), r1.get("credit_amount")
@@ -194,10 +194,10 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
         amt2 = wd2 if wd2 else (cr2 if cr2 else None)
         if isinstance(amt1, (int, float)) and isinstance(amt2, (int, float)) and abs(amt1 - amt2) < 1e-6:
             if (wd1 and cr2) or (cr1 and wd2):
-                alerts.append(f"Possible reversal pair at rows {i+1} and {i+2} (equal opposite amounts).")
+                alerts.append(f"Possible reversal pair at rows {i+1} and {i+2}.")
                 break
 
-    # Frequent same-day repeats of same description & amount (>=4)
+    # Frequent same-day repeats (same description & amount) 4+
     from collections import Counter
     key_counts = Counter()
     examples = {}
@@ -215,7 +215,7 @@ def _detect_unusual_activity(payload: Dict[str, Any]) -> list:
     if repeated:
         k, c = max(repeated, key=lambda x: x[1])
         alerts.append(
-            f"Repeated same-day transactions detected ({c}×): '{k[1]}' on {k[0]} amount {k[2]:,.2f} (possible splitting/bot)."
+            f"Repeated same-day transactions detected ({c}×): '{k[1]}' on {k[0]} amount {k[2]:,.2f}."
         )
 
     return alerts
@@ -241,7 +241,7 @@ def extract_financial_statement(
 
         client = genai.Client(api_key=api_key)
 
-        # Inline file bytes; explicit mime_type (do NOT pass filename).
+        # Inline file bytes; explicit mime_type (no filename arg).
         pdf_part = types.Part.from_bytes(
             data=file_bytes,
             mime_type="application/pdf",
@@ -295,7 +295,6 @@ def extract_financial_statement(
         # ---------- Robust parsing ----------
         payload: Optional[Dict[str, Any]] = None
 
-        # 1) Prefer structured parse
         if hasattr(response, "parsed") and response.parsed:
             parsed = response.parsed
             if isinstance(parsed, dict):
@@ -303,11 +302,9 @@ def extract_financial_statement(
             elif hasattr(parsed, "model_dump"):
                 payload = parsed.model_dump()
 
-        # 2) Try response.text
         if payload is None and raw_text:
             payload = _extract_first_json_object(raw_text)
 
-        # 3) Try candidates
         if payload is None and candidates_texts:
             for txt in candidates_texts:
                 payload = _extract_first_json_object(txt)
@@ -315,12 +312,12 @@ def extract_financial_statement(
                     break
 
         if payload is None:
-            return None, raw_dump, "Model returned content that could not be parsed into valid JSON."
+            return None, raw_dump, "Could not parse JSON response."
 
-        # Optional fallback: compute debit/credit counts if missing
+        # Fill counts if model omitted them
         _compute_counts_if_missing(payload)
 
-        # Detect unusual activity
+        # Unusual activity alerts
         try:
             alerts = _detect_unusual_activity(payload)
             if alerts:
@@ -331,7 +328,8 @@ def extract_financial_statement(
         return payload, raw_dump, None
 
     except Exception as e:
-        return None, None, f"An error occurred during extraction: {e}"
+        # Keep error concise
+        return None, None, "Extraction error."
 
 
 # --- Excel Export ---

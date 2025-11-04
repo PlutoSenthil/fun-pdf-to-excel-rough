@@ -28,11 +28,8 @@ st.set_page_config(
 )
 st.title("📄 Gemini‑Powered Financial Statement Extractor")
 st.markdown(
-    "Upload a **PDF financial statement** and extract structured transactions into Excel.\n\n"
-    "This app also:\n"
-    "- Captures **raw model responses** for download if table conversion fails (save your free-tier runs).\n"
-    "- Maintains a **usage log** per API key and model.\n"
-    "- Flags **unusual activity** in the transactions."
+    "Upload a **PDF financial statement** and extract structured transactions into Excel.\n"
+    "If extraction fails, you can **download the raw response** to avoid wasting the run."
 )
 
 
@@ -59,21 +56,8 @@ def _load_available_api_keys() -> List[Tuple[str, str]]:
     return found
 
 
-def _quota_or_rate_limit_suspected(error_msg: str) -> bool:
-    if not error_msg:
-        return False
-    e = error_msg.lower()
-    return any(
-        term in e
-        for term in [
-            "quota", "rate limit", "429", "resource exhausted", "exceeded", "quota exceeded",
-            "too many requests", "billing", "insufficient", "free tier"
-        ]
-    )
-
-
 def _try_extract_pdf_text_stats(file_bytes: bytes) -> Optional[Dict[str, Any]]:
-    """Optional local text stats (pymupdf if available)."""
+    """Optional local text stats via PyMuPDF; returns None if not available."""
     try:
         import fitz  # pymupdf
     except Exception:
@@ -87,7 +71,35 @@ def _try_extract_pdf_text_stats(file_bytes: bytes) -> Optional[Dict[str, Any]]:
         char_count = len(text)
         word_count = len(text.split())
         est_tokens = max(int(char_count / 4), int(word_count * 0.75))
-        return {"pages": pages, "char_count": char_count, "word_count": word_count, "estimated_tokens": est_tokens}
+        return {"pages": pages, "char_count": char_count, "word_count": word_count, "estimated_tokens": est_tokens, "sample_text": text[:1200]}
+    except Exception:
+        return None
+
+
+def _try_ocr_sample(file_bytes: bytes, pages_to_ocr: int = 1) -> Optional[str]:
+    """
+    Optional OCR sample using PyMuPDF rasterization + pytesseract.
+    Returns sample text or None if libs not available or failure.
+    """
+    try:
+        import fitz  # pymupdf
+        from PIL import Image
+        import pytesseract
+    except Exception:
+        return None
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        sample = []
+        for idx, page in enumerate(doc):
+            if idx >= pages_to_ocr:
+                break
+            pix = page.get_pixmap(dpi=200)  # rasterize
+            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            txt = pytesseract.image_to_string(img) or ""
+            if txt.strip():
+                sample.append(txt.strip())
+        doc.close()
+        return "\n\n".join(sample)[:1200] if sample else None
     except Exception:
         return None
 
@@ -121,7 +133,6 @@ def _append_usage_log(
     if meta:
         entry.update(meta)
     st.session_state["usage_log"].append(entry)
-    # Best-effort write to local file as well (ephemeral on some platforms)
     try:
         with open("usage_log.json", "w", encoding="utf-8") as f:
             json.dump(st.session_state["usage_log"], f, ensure_ascii=False, indent=2)
@@ -129,15 +140,11 @@ def _append_usage_log(
         pass
 
 
-def _download_bytes_button(label: str, data_bytes: bytes, file_name: str, mime: str):
-    st.download_button(label=label, data=data_bytes, file_name=file_name, mime=mime)
-
-
 # ---------------- Sidebar ----------------
 with st.sidebar:
     st.header("Configuration")
 
-    # API Key selection: dropdown over GOOGLE_API_KEY_1..3 (default to _1). If none found, allow manual entry.
+    # API Key selection
     st.markdown("### ✅ API Key")
     available_keys = _load_available_api_keys()
     api_key_label: str = "MANUAL"
@@ -169,8 +176,7 @@ with st.sidebar:
     selected_model_name_display = st.selectbox(
         "Choose the Gemini Model",
         options=options,
-        index=default_model_idx,
-        help="Flash = fast & cost-effective; Pro = higher quality but may be slower or restricted."
+        index=default_model_idx
     )
     MODEL_ID = MODEL_CHOICES[selected_model_name_display]
     st.info(f"Selected Model ID: `{MODEL_ID}`")
@@ -178,6 +184,19 @@ with st.sidebar:
     # File upload
     st.markdown("### ⬆️ Upload PDF")
     uploaded_file = st.file_uploader("Upload a PDF Financial Statement", type=["pdf"])
+
+    # Usage log download (kept in sidebar)
+    st.markdown("---")
+    st.subheader("📜 Usage Log")
+    _ensure_usage_log_in_state()
+    log_json = json.dumps(st.session_state["usage_log"], ensure_ascii=False, indent=2).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download usage_log.json",
+        data=log_json,
+        file_name="usage_log.json",
+        mime="application/json"
+    )
+    st.caption("Includes timestamp, key label, model, file, duration, success/error, counts, token estimate.")
 
 
 # ---------------- Main ----------------
@@ -190,23 +209,28 @@ if uploaded_file:
     c2.metric("File Size", f"{uploaded_file.size / 1024 / 1024:.2f} MB")
     c3.metric("Model Selected", MODEL_ID)
 
-    # Optional local PDF stats (tokens estimate) if pymupdf present
-    pdf_stats = None
+    # Optional local PDF stats (tokens estimate) and OCR sample
     try:
         uploaded_file.seek(0)
-        _fb = uploaded_file.read()
-        pdf_stats = _try_extract_pdf_text_stats(_fb)
+        file_bytes_for_stats = uploaded_file.read()
+        pdf_stats = _try_extract_pdf_text_stats(file_bytes_for_stats)
+        if pdf_stats:
+            with st.expander("📊 Local PDF Text Stats (approx.)", expanded=False):
+                st.write({
+                    "Pages": pdf_stats["pages"],
+                    "Characters": pdf_stats["char_count"],
+                    "Words": pdf_stats["word_count"],
+                    "Estimated Tokens (rough)": pdf_stats["estimated_tokens"],
+                })
+                if pdf_stats.get("sample_text"):
+                    st.code(pdf_stats["sample_text"][:600], language="text")
+        # Optional OCR sample (if libraries available)
+        ocr_snippet = _try_ocr_sample(file_bytes_for_stats, pages_to_ocr=1)
+        if ocr_snippet:
+            with st.expander("🔎 OCR Sample (pytesseract)", expanded=False):
+                st.code(ocr_snippet, language="text")
     except Exception:
-        pdf_stats = None
-
-    if pdf_stats:
-        with st.expander("📊 Local PDF Text Stats (approximate)", expanded=False):
-            st.write({
-                "Pages": pdf_stats["pages"],
-                "Characters": pdf_stats["char_count"],
-                "Words": pdf_stats["word_count"],
-                "Estimated Tokens (rough)": pdf_stats["estimated_tokens"],
-            })
+        pass
 
     st.markdown("---")
 
@@ -230,19 +254,13 @@ if uploaded_file:
                     )
                 duration = time.time() - t0
 
-                # Prepare usage metadata
                 meta = {
                     "transactions": len(extracted_data.get("transaction_data", [])) if extracted_data else 0,
                     "debit_count": extracted_data.get("debit_count") if extracted_data else None,
                     "credit_count": extracted_data.get("credit_count") if extracted_data else None,
                     "alerts_count": len(extracted_data.get("alerts", [])) if (extracted_data and extracted_data.get("alerts")) else 0,
-                    "estimated_tokens": (pdf_stats or {}).get("estimated_tokens"),
+                    "estimated_tokens": (pdf_stats or {}).get("estimated_tokens") if 'pdf_stats' in locals() else None,
                 }
-
-                # Detect quota issues
-                quota_flag = _quota_or_rate_limit_suspected(error or "")
-                if quota_flag:
-                    meta["quota_suspected"] = True
 
                 _append_usage_log(
                     api_key_label=api_key_label,
@@ -256,20 +274,12 @@ if uploaded_file:
                 )
 
                 if error:
-                    st.error(f"Extraction Failed: {error}")
-
-                    if quota_flag:
-                        st.warning(
-                            "It looks like the **free-tier limit or quota** might have been reached for this API key. "
-                            "Please switch to another key in the sidebar (e.g., GOOGLE_API_KEY_2 or _3) and try again."
-                        )
-
+                    st.error("Extraction failed.")
                     # Provide raw-response download options to avoid wasting the run
                     st.subheader("Backup: Raw Gemini Response")
-                    if raw_dump:
-                        base_name = os.path.splitext(uploaded_file.name)[0]
+                    base_name = os.path.splitext(uploaded_file.name)[0]
 
-                        # Raw JSON dump (model id + response_text + candidates_texts)
+                    if raw_dump:
                         raw_json_bytes = json.dumps(raw_dump, ensure_ascii=False, indent=2).encode("utf-8")
                         st.download_button(
                             label="⬇️ Download Raw Response (.json)",
@@ -278,13 +288,13 @@ if uploaded_file:
                             mime="application/json"
                         )
 
-                        # Raw TXT for easy manual inspection
                         raw_txt = ""
                         if raw_dump.get("response_text"):
                             raw_txt += "=== response_text ===\n" + str(raw_dump["response_text"]) + "\n\n"
                         if raw_dump.get("candidates_texts"):
                             for i, t in enumerate(raw_dump["candidates_texts"], 1):
                                 raw_txt += f"=== candidate {i} ===\n{t}\n\n"
+
                         if raw_txt:
                             st.download_button(
                                 label="⬇️ Download Raw Response (.txt)",
@@ -294,18 +304,8 @@ if uploaded_file:
                             )
                         else:
                             st.info("No raw text available from the model response.")
-
-                    with st.expander("Troubleshooting tips"):
-                        st.markdown(
-                            "- Ensure the API key is valid and has access to the selected model.\n"
-                            "- Try a text-based (non-scanned) PDF under ~20MB.\n"
-                            "- If the PDF is scanned, try a clearer copy; OCR quality matters.\n"
-                            "- Try another model (e.g., Gemini 2.5 Flash vs 2.0 Flash).\n"
-                            "- Download the raw response (above) to avoid losing this run."
-                        )
-
                 else:
-                    st.success("🎉 Data Extraction Complete!")
+                    st.success("✅ Done.")
 
                     # Alerts (unusual activity)
                     alerts = extracted_data.get("alerts", [])
@@ -315,7 +315,7 @@ if uploaded_file:
                                 st.markdown(f"- {a}")
 
                     # Summary
-                    st.subheader("Summary Information")
+                    st.subheader("Summary")
                     summary_cols = [
                         "institution_name", "account_holder_name", "statement_period",
                         "initial_balance", "closing_balance", "total_debit_amount",
@@ -326,53 +326,24 @@ if uploaded_file:
                     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
                     # Transactions Preview
-                    st.subheader("Transaction Data Preview")
+                    st.subheader("Transactions Preview")
                     transaction_list = extracted_data.get("transaction_data", [])
                     if transaction_list:
                         df_preview = pd.DataFrame(transaction_list)
                         st.dataframe(df_preview.head(10), use_container_width=True)
-                        st.info(f"Successfully extracted **{len(transaction_list)}** transactions. Download the full file below.")
+                        st.info(f"Extracted **{len(transaction_list)}** transactions. Download the full file below.")
 
-                        # Excel download of structured data
+                        # Excel download
                         excel_buffer = json_to_excel_buffer(extracted_data)
                         base_name = os.path.splitext(uploaded_file.name)[0]
                         st.download_button(
-                            label="⬇️ Download Extracted Data as Excel (.xlsx)",
+                            label="⬇️ Download Extracted Data (.xlsx)",
                             data=excel_buffer,
                             file_name=f"{base_name}_extracted.xlsx",
                             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                         )
                     else:
-                        st.warning(
-                            "The model returned summary data but no transactions were found in the PDF. "
-                            "Try a different model or ensure the PDF contains a clearly formatted transaction table."
-                        )
+                        st.warning("No transactions found.")
 
-                    # Always offer raw response downloads as backup (even on success)
-                    if raw_dump:
-                        with st.expander("Backup: Raw Gemini Response (for auditing)", expanded=False):
-                            base_name = os.path.splitext(uploaded_file.name)[0]
-                            raw_json_bytes = json.dumps(raw_dump, ensure_ascii=False, indent=2).encode("utf-8")
-                            st.download_button(
-                                label="⬇️ Download Raw Response (.json)",
-                                data=raw_json_bytes,
-                                file_name=f"{base_name}_gemini_raw.json",
-                                mime="application/json"
-                            )
-
-            except Exception as e:
-                st.error(f"An unexpected application error occurred: {e}")
-
-
-# ---------------- Usage Log Downloads ----------------
-st.markdown("---")
-st.subheader("📜 Usage & Quota Log")
-_ensure_usage_log_in_state()
-log_json = json.dumps(st.session_state["usage_log"], ensure_ascii=False, indent=2).encode("utf-8")
-st.download_button(
-    label="⬇️ Download usage_log.json",
-    data=log_json,
-    file_name="usage_log.json",
-    mime="application/json"
-)
-st.caption("This includes timestamp, API key label, model, file, duration, success/error, and basic metrics per run.")
+            except Exception:
+                st.error("Unexpected application error.")
