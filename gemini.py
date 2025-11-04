@@ -59,7 +59,7 @@ DEFAULT_PROMPT = (
 )
 
 
-class GeminiBankExtractor:
+class GeminiExtractor:
     """
     Handles uploading PDFs to Google Gemini File API, requesting a structured JSON
     that conforms to the Pydantic schema, and converting it to Excel.

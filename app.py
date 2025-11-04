@@ -6,7 +6,7 @@ import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
 
-from gemini import GeminiBankExtractor
+from gemini import GeminiExtractor
 
 load_dotenv()  # Loads .env if present
 
@@ -26,18 +26,13 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-st.set_page_config(page_title="Bank Statement → Excel (Gemini)", page_icon="📄", layout="centered")
+st.set_page_config(page_title=" Statement → Excel (Gemini)", page_icon="📄", layout="centered")
 
-st.title("📄→📊 Bank Statement Extractor (Gemini)")
-st.caption("Upload bank statement PDFs. Each PDF will be extracted into a structured Excel file.")
+st.title("📄→📊  Statement Extractor (Gemini)")
+st.caption("Upload  statement PDFs. Each PDF will be extracted into a structured Excel file.")
 
 with st.expander("⚠️ Security & Notes", expanded=False):
-    st.markdown(
-        "- **Do not** upload sensitive data to public/shared deployments.\n"
-        "- Rotate any API keys that may have been exposed.\n"
-        "- Costs may apply for model usage; monitor your quota.\n"
-        "- For folder uploads, please **zip the folder** and upload the ZIP."
-    )
+    st.markdown("- For folder uploads, please **zip the folder** and upload the ZIP.")
 
 # --- Sidebar: Config ---
 with st.sidebar:
@@ -47,14 +42,12 @@ with st.sidebar:
 
     api_key_default = get_api_key()
     api_key = st.text_input("Google API Key", value=api_key_default, type="password")
-    st.markdown(
-        "Set `GOOGLE_API_KEY` in environment variables or Streamlit secrets for convenience."
-    )
+    st.markdown("Set `GOOGLE_API_KEY` in environment variables or Streamlit secrets for convenience.")
 
     custom_prompt = st.text_area(
         "Extraction Prompt (optional, advanced)",
         value="",
-        placeholder="Leave blank to use the default prompt tuned for bank statements.",
+        placeholder="Leave blank to use the default prompt tuned for  statements.",
         height=120,
     )
 
@@ -80,7 +73,7 @@ if process_clicked:
         st.stop()
 
     # Initialize extractor
-    extractor = GeminiBankExtractor(
+    extractor = GeminiExtractor(
         api_key=api_key,
         model_id=model_id or "gemini-2.5-flash",
         prompt=custom_prompt.strip() or None  # None will default inside class
@@ -149,6 +142,6 @@ if process_clicked:
     st.download_button(
         label="⬇️ Download All as ZIP",
         data=output_zip.getvalue(),
-        file_name="bank_statements_excel.zip",
+        file_name="statements_excel.zip",
         mime="application/zip"
     )
