@@ -1,7 +1,0 @@
-pdfplumber
-PyMuPDF
-pytesseract
-easyocr
-opencv-python
-Pillow
-numpy

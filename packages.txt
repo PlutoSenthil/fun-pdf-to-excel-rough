@@ -1,3 +1,0 @@
-ghostscript
-poppler-utils
-tesseract-ocr
