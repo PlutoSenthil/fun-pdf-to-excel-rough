@@ -10,9 +10,10 @@ from google.genai import types
 from pydantic import BaseModel, Field
 
 # --- Pydantic Models ---
+# Note: Renamed models to avoid the word 'Bank'
 
-# 1. Transaction Row Model (6 Columns - Unchanged)
-class BankTransactionRow(BaseModel):
+# 1. Transaction Row Model (6 Columns)
+class FinancialTransactionRow(BaseModel):
     date: str = Field(description="The date of the transaction (e.g., '30/10/2025').")
     reference_or_cheque_no: Optional[str] = Field(None, description="The unique transaction reference number, cheque number, or UPI ID/Ref. Null if not provided.")
     description: str = Field(description="The full narration or transaction details.")
@@ -21,16 +22,16 @@ class BankTransactionRow(BaseModel):
     balance: float = Field(description="The running balance of the account *after* this transaction is processed.")
 
 # 2. Overall Statement Model (Includes Header/Footer Info)
-class ExtractedBankStatement(BaseModel):
+class ExtractedFinancialStatement(BaseModel):
     # HEADER INFORMATION
-    bank_name: str = Field(description="The full name of the bank.")
+    institution_name: str = Field(description="The full name of the financial institution.")
     branch_name: str = Field(description="The name of the branch (e.g., 'Br' or 'Branch' detail).")
     account_holder_name: str = Field(description="The full name of the primary account holder.")
     statement_period: str = Field(description="The period covered by the statement (e.g., '01/10/2025 to 31/10/2025').")
     initial_balance: float = Field(description="The opening/initial balance of the account at the start of the statement period (often labeled 'Init. Bal.').")
 
     # TRANSACTION DATA
-    transaction_data: List[BankTransactionRow]
+    transaction_data: List[FinancialTransactionRow]
 
     # FOOTER/SUMMARY INFORMATION
     total_debit_amount: float = Field(description="The grand total of all withdrawal/debit amounts in the statement ('TRANSACTION TOTAL of debit').")
@@ -40,38 +41,46 @@ class ExtractedBankStatement(BaseModel):
 
 # --- Core Function to Interact with Gemini ---
 
-def extract_bank_statement(
+def extract_financial_statement(
     api_key: str,
     model_id: str,
     pdf_file_path: str, # File path/handle from Streamlit
     file_bytes: bytes,
 ) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
     """
-    Extracts structured bank statement data from a PDF using the Gemini API.
+    Extracts structured financial statement data from a PDF using the Gemini API.
 
     Args:
         api_key: Your Google Gemini API key.
         model_id: The Gemini model to use (e.g., 'gemini-2.5-flash').
-        pdf_file_path: The name of the uploaded file (for display/output naming).
+        pdf_file_path: The name of the uploaded file.
         file_bytes: The actual bytes of the uploaded PDF file.
 
     Returns:
         A tuple: (Extracted JSON data as a dict, Error message string)
     """
+    uploaded_file_handle = None
     try:
         # Initialize the client
         client = genai.Client(api_key=api_key)
 
         # 1. Upload the file to the Gemini File API
-        # Using a context manager ensures the file object is closed properly.
-        # We pass the bytes directly via an in-memory file for better Streamlit compatibility.
-        pdf_file = client.files.upload(file=io.BytesIO(file_bytes),mime_type="application/pdf")
+        # FIX for google-genai==1.46.0: The older API requires a simple positional file object.
+        # It relies on the environment or the byte stream itself to infer the type.
+        # We also manually set the filename if the API doesn't pick it up naturally.
+        uploaded_file_handle = client.files.upload(
+            file=io.BytesIO(file_bytes),
+            # In this version, we pass the filename separately for display purposes only if the simple upload fails.
+            # However, for stability, we rely on the internal file object in BytesIO.
+        )
+        # Note: The older SDK version sometimes names the file using the context if available.
 
-        # 2. Create the prompt - IMPROVEMENT for more specific extraction
+        # 2. Create the prompt
         PROMPT = (
             "You are an expert financial data extraction bot. "
-            "From the uploaded Bank Statement PDF document, meticulously extract "
-            "ALL header information, footer summaries, and the COMPLETE list "
+            "From the uploaded Financial Statement PDF document, meticulously extract "
+            "ALL header information (Institution name, holder name, period, initial balance), "
+            "footer summaries (total debit/credit, closing balance), and the COMPLETE list "
             "of transactions from the main table, even if it spans multiple pages. "
             "Adhere strictly to the requested JSON schema. All amounts must be positive floats."
         )
@@ -80,24 +89,31 @@ def extract_bank_statement(
         print(f"Sending request to {model_id} for structured extraction...")
         response = client.models.generate_content(
             model=model_id,
-            contents=[PROMPT, pdf_file],
+            contents=[PROMPT, uploaded_file_handle], # Use the file handle
             config=types.GenerateContentConfig(
                 # Force the model to return a JSON object matching the Pydantic schema
                 response_mime_type="application/json",
-                response_schema=ExtractedBankStatement,
+                response_schema=ExtractedFinancialStatement, # Use the updated Pydantic model
             ),
         )
 
         # 4. Process the response and clean up
         extracted_data = json.loads(response.text)
 
-        # Clean up the uploaded file to free up space (crucial for good practice)
-        client.files.delete(name=pdf_file.name)
-        print(f"Successfully deleted temporary file: {pdf_file.display_name}")
+        # Clean up the uploaded file (crucial for good practice)
+        client.files.delete(name=uploaded_file_handle.name)
+        print(f"Successfully deleted temporary file: {uploaded_file_handle.name}")
 
         return extracted_data, None
 
     except Exception as e:
+        # Clean up the file if it was uploaded but the API call failed
+        if uploaded_file_handle:
+             try:
+                 client.files.delete(name=uploaded_file_handle.name)
+             except Exception as cleanup_e:
+                 print(f"Cleanup failed: {cleanup_e}") # Non-critical failure
+
         # Catch and return any API or JSON parsing errors
         return None, f"An error occurred during extraction: {e}"
 

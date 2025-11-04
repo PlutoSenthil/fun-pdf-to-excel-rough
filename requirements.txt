@@ -1,5 +1,5 @@
-google-genai
-pydantic
+google-genai==1.46.0
+pydantic==2.11.10
 pandas
 streamlit
-openpyxl # Needed by pandas to write to .xlsx files
+openpyxl
