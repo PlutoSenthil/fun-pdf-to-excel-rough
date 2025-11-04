@@ -26,9 +26,9 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-st.set_page_config(page_title=" Statement → Excel (Gemini)", page_icon="📄", layout="centered")
+st.set_page_config(page_title=" Statement → Excel", page_icon="📄", layout="centered")
 
-st.title("📄→📊  Statement Extractor (Gemini)")
+st.title("📄→📊  Statement Extractor")
 st.caption("Upload  statement PDFs. Each PDF will be extracted into a structured Excel file.")
 
 with st.expander("⚠️ Security & Notes", expanded=False):
